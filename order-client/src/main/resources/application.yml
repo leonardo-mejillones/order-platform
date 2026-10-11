@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: order-client
+grpc:
+  client:
+    host: localhost
+    port: 9090
