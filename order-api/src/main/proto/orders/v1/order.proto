@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package orders.v1;
+
+option java_multiple_files = true;
+option java_package = "com.example.orders.v1";
+
+import "google/protobuf/timestamp.proto";
+
+service OrderService {
+  // Unary
+  rpc CreateOrder(CreateOrderRequest) returns (CreateOrderResponse);
+  rpc GetOrder(GetOrderRequest) returns (Order);
+
+  // Server streaming: el servidor empuja actualizaciones de estado
+  rpc WatchOrder(WatchOrderRequest) returns (stream OrderEvent);
+
+  // Client streaming: carga masiva de órdenes
+  rpc BulkCreateOrders(stream CreateOrderRequest) returns (BulkCreateSummary);
+
+  // Bidirectional streaming: chat de estados / ack por mensaje
+  rpc ProcessOrders(stream OrderCommand) returns (stream OrderResult);
+}
+
+message CreateOrderRequest {
+  string idempotency_key = 1;
+  string customer_id = 2;
+  repeated OrderItem items = 3;
+}
+
+message OrderItem {
+  string sku = 1;
+  int32 quantity = 2;
+  int64 unit_price_cents = 3;
+}
+
+message CreateOrderResponse {
+  string order_id = 1;
+  OrderStatus status = 2;
+}
+
+message GetOrderRequest { string order_id = 1; }
+message WatchOrderRequest { string order_id = 1; }
+
+message Order {
+  string order_id = 1;
+  string customer_id = 2;
+  repeated OrderItem items = 3;
+  OrderStatus status = 4;
+  google.protobuf.Timestamp created_at = 5;
+  reserved 6;              // ejemplo de campo eliminado
+  reserved "legacy_note";
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_CREATED = 1;
+  ORDER_STATUS_PAID = 2;
+  ORDER_STATUS_SHIPPED = 3;
+  ORDER_STATUS_CANCELLED = 4;
+}
+
+message OrderEvent {
+  string order_id = 1;
+  OrderStatus status = 2;
+  google.protobuf.Timestamp occurred_at = 3;
+}
+
+message BulkCreateSummary {
+  int32 received = 1;
+  int32 created = 2;
+  int32 failed = 3;
+}
+
+message OrderCommand {
+  oneof command {
+    CreateOrderRequest create = 1;
+    CancelOrder cancel = 2;
+  }
+}
+message CancelOrder { string order_id = 1; }
+
+message OrderResult {
+  string order_id = 1;
+  bool success = 2;
+  string message = 3;
+}
