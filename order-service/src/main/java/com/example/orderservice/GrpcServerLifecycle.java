@@ -2,6 +2,7 @@ package com.example.orderservice;
 
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
+import io.grpc.ServerInterceptors;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
@@ -14,20 +15,28 @@ public class GrpcServerLifecycle implements SmartLifecycle {
 
     private final OrderServiceImpl orderService;
     private final int port;
+    private final String authToken;
     private Server server;
     private volatile boolean running;
 
     public GrpcServerLifecycle(OrderServiceImpl orderService,
-                               @Value("${grpc.server.port:9090}") int port) {
+                               @Value("${grpc.server.port:9090}") int port,
+                               @Value("${grpc.server.auth-token:dev-token}") String authToken) {
         this.orderService = orderService;
         this.port = port;
+        this.authToken = authToken;
     }
 
     @Override
     public void start() {
         try {
+            // El ÚLTIMO interceptor de la lista es el PRIMERO en ejecutarse.
+            // Logging va último para registrar también los rechazos de autenticación.
             server = ServerBuilder.forPort(port)
-                    .addService(orderService)
+                    .addService(ServerInterceptors.intercept(
+                            orderService,
+                            new AuthServerInterceptor(authToken),
+                            new LoggingServerInterceptor()))
                     .build()
                     .start();
         } catch (IOException e) {
@@ -36,7 +45,6 @@ public class GrpcServerLifecycle implements SmartLifecycle {
         running = true;
         System.out.println("gRPC server started on port " + port);
 
-        // Hilo no-daemon para que la JVM no termine (esta app no tiene servidor web)
         Thread await = new Thread(() -> {
             try {
                 server.awaitTermination();

@@ -4,3 +4,4 @@ spring:
 grpc:
   server:
     port: 9090
+    auth-token: dev-token

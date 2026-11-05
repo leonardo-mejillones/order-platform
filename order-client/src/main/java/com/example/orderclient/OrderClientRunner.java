@@ -3,91 +3,102 @@ package com.example.orderclient;
 import com.example.orders.v1.CreateOrderRequest;
 import com.example.orders.v1.CreateOrderResponse;
 import com.example.orders.v1.GetOrderRequest;
-import com.example.orders.v1.Order;
+import com.example.orders.v1.OrderEvent;
 import com.example.orders.v1.OrderItem;
 import com.example.orders.v1.OrderServiceGrpc;
+import com.example.orders.v1.WatchOrderRequest;
+import io.grpc.Context;
+import io.grpc.ManagedChannel;
 import io.grpc.StatusRuntimeException;
-import io.grpc.stub.StreamObserver;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.CountDownLatch;
+import java.util.Iterator;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 @Component
 public class OrderClientRunner implements CommandLineRunner {
 
-    private final OrderServiceGrpc.OrderServiceBlockingStub blockingStub;
-    private final OrderServiceGrpc.OrderServiceStub asyncStub;
+    private final OrderServiceGrpc.OrderServiceBlockingStub stub;
+    private final ManagedChannel channel;
 
-    public OrderClientRunner(OrderServiceGrpc.OrderServiceBlockingStub blockingStub,
-                             OrderServiceGrpc.OrderServiceStub asyncStub) {
-        this.blockingStub = blockingStub;
-        this.asyncStub = asyncStub;
+    public OrderClientRunner(OrderServiceGrpc.OrderServiceBlockingStub stub, ManagedChannel channel) {
+        this.stub = stub;
+        this.channel = channel;
     }
 
     @Override
     public void run(String... args) throws Exception {
-        CreateOrderRequest request = CreateOrderRequest.newBuilder()
-                .setCustomerId("cust-001")
+
+        System.out.println("\n=== 1. Idempotencia: misma key, mismo payload ===");
+        String key = UUID.randomUUID().toString();
+        CreateOrderRequest req = newOrder("cust-001", "SKU-123", 2).setIdempotencyKey(key).build();
+        CreateOrderResponse first = stub.createOrder(req);
+        CreateOrderResponse second = stub.createOrder(req);
+        System.out.println("first  = " + first.getOrderId());
+        System.out.println("second = " + second.getOrderId());
+        System.out.println("misma orden? " + first.getOrderId().equals(second.getOrderId()));
+
+        System.out.println("\n=== 2. Idempotencia: misma key, payload distinto ===");
+        expectError("reuse key", () ->
+                stub.createOrder(newOrder("cust-001", "SKU-999", 5).setIdempotencyKey(key).build()));
+
+        System.out.println("\n=== 3. Deadline (el servidor tarda 3 s, el cliente espera 500 ms) ===");
+        expectError("slow call", () ->
+                stub.withDeadlineAfter(500, TimeUnit.MILLISECONDS)
+                        .createOrder(newOrder("slow-cust", "SKU-1", 1).build()));
+
+        System.out.println("\n=== 4. Autenticación: stub SIN interceptor ===");
+        OrderServiceGrpc.OrderServiceBlockingStub anonymous = OrderServiceGrpc.newBlockingStub(channel);
+        expectError("no token", () ->
+                anonymous.createOrder(newOrder("cust-001", "SKU-123", 1).build()));
+
+        System.out.println("\n=== 5. Errores de negocio ===");
+        expectError("get inexistente", () ->
+                stub.getOrder(GetOrderRequest.newBuilder().setOrderId("does-not-exist").build()));
+        expectError("create inválido", () ->
+                stub.createOrder(CreateOrderRequest.newBuilder().setCustomerId("").build()));
+
+        System.out.println("\n=== 6. WatchOrder: server streaming hasta estado terminal ===");
+        CreateOrderResponse watched = stub.createOrder(newOrder("cust-watch", "SKU-1", 1).build());
+        Iterator<OrderEvent> events = stub.withDeadlineAfter(10, TimeUnit.SECONDS)
+                .watchOrder(WatchOrderRequest.newBuilder().setOrderId(watched.getOrderId()).build());
+        while (events.hasNext()) {
+            OrderEvent event = events.next();
+            System.out.println("evento: " + event.getStatus());
+        }
+        System.out.println("stream completado por el servidor");
+
+        System.out.println("\n=== 7. WatchOrder: cancelación desde el cliente ===");
+        CreateOrderResponse cancelled = stub.createOrder(newOrder("cust-cancel", "SKU-1", 1).build());
+        Context.CancellableContext ctx = Context.current().withCancellation();
+        try {
+            ctx.run(() -> {
+                Iterator<OrderEvent> it = stub.watchOrder(
+                        WatchOrderRequest.newBuilder().setOrderId(cancelled.getOrderId()).build());
+                System.out.println("primer evento: " + it.next().getStatus() + " -> cancelando el stream");
+            });
+        } finally {
+            ctx.cancel(null);
+        }
+        Thread.sleep(500); // da tiempo a que el servidor loguee la cancelación
+    }
+
+    private static CreateOrderRequest.Builder newOrder(String customerId, String sku, int quantity) {
+        return CreateOrderRequest.newBuilder()
+                .setCustomerId(customerId)
                 .addItems(OrderItem.newBuilder()
-                        .setSku("SKU-123").setQuantity(2).setUnitPriceCents(1999).build())
-                .build();
+                        .setSku(sku).setQuantity(quantity).setUnitPriceCents(1999).build());
+    }
 
-        // 1. Blocking stub con deadline
-        System.out.println("=== 1. CreateOrder (blocking) ===");
-        CreateOrderResponse created = blockingStub
-                .withDeadlineAfter(2, TimeUnit.SECONDS)
-                .createOrder(request);
-        System.out.println("Created: " + created.getOrderId() + " " + created.getStatus());
-
-        // 2. GetOrder
-        System.out.println("=== 2. GetOrder (blocking) ===");
-        Order order = blockingStub.getOrder(
-                GetOrderRequest.newBuilder().setOrderId(created.getOrderId()).build());
-        System.out.println("Fetched: " + order);
-
-        // 3. Error esperado: NOT_FOUND
-        System.out.println("=== 3. GetOrder inexistente ===");
+    private static void expectError(String label, Runnable call) {
         try {
-            blockingStub.getOrder(GetOrderRequest.newBuilder().setOrderId("does-not-exist").build());
+            call.run();
+            System.out.println(label + " -> ¡no falló! (inesperado)");
         } catch (StatusRuntimeException e) {
-            System.out.println("Error esperado: " + e.getStatus().getCode()
-                    + " - " + e.getStatus().getDescription());
-        }
-
-        // 4. Error esperado: INVALID_ARGUMENT
-        System.out.println("=== 4. CreateOrder inválido ===");
-        try {
-            blockingStub.createOrder(CreateOrderRequest.newBuilder().setCustomerId("").build());
-        } catch (StatusRuntimeException e) {
-            System.out.println("Error esperado: " + e.getStatus().getCode()
-                    + " - " + e.getStatus().getDescription());
-        }
-
-        // 5. Async stub con StreamObserver
-        System.out.println("=== 5. CreateOrder (async) ===");
-        CountDownLatch latch = new CountDownLatch(1);
-        asyncStub.createOrder(request, new StreamObserver<>() {
-            @Override
-            public void onNext(CreateOrderResponse value) {
-                System.out.println("Async created: " + value.getOrderId());
-            }
-
-            @Override
-            public void onError(Throwable t) {
-                System.err.println("Async error: " + t);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                System.out.println("Async completed");
-                latch.countDown();
-            }
-        });
-        if (!latch.await(5, TimeUnit.SECONDS)) {
-            System.err.println("Async call timed out");
+            System.out.println(label + " -> " + e.getStatus().getCode()
+                    + ": " + e.getStatus().getDescription());
         }
     }
 }

@@ -19,12 +19,18 @@ public class GrpcClientConfig {
     }
 
     @Bean
-    public OrderServiceGrpc.OrderServiceBlockingStub blockingStub(ManagedChannel channel) {
-        return OrderServiceGrpc.newBlockingStub(channel);
+    public OrderServiceGrpc.OrderServiceBlockingStub blockingStub(
+            ManagedChannel channel,
+            @Value("${grpc.client.auth-token:dev-token}") String token) {
+        return OrderServiceGrpc.newBlockingStub(channel)
+                .withInterceptors(new ClientHeadersInterceptor(token));
     }
 
     @Bean
-    public OrderServiceGrpc.OrderServiceStub asyncStub(ManagedChannel channel) {
-        return OrderServiceGrpc.newStub(channel);
+    public OrderServiceGrpc.OrderServiceStub asyncStub(
+            ManagedChannel channel,
+            @Value("${grpc.client.auth-token:dev-token}") String token) {
+        return OrderServiceGrpc.newStub(channel)
+                .withInterceptors(new ClientHeadersInterceptor(token));
     }
 }
